@@ -23,12 +23,16 @@ async def get_descendant_activity_ids(
 
     stmt = select(cte.c.id)
     res = await session.execute(stmt)
-    ids = [int(row[0]) for row in res.fetchall()]
+    ids = [int(i) for i in res.scalars().all()]
 
     if not include_self:
         ids = [i for i in ids if i != activity_id]
     return ids
 
+async def activity_exists(session: AsyncSession, *, activity_id: int) -> bool:
+    stmt = select(Activity.id).where(Activity.id == activity_id)
+    res = await session.execute(stmt)
+    return res.scalar_one_or_none() is not None
 
 async def list_activity_tree(session: AsyncSession) -> list[ActivityTreeNode]:
     """Returns activity tree limited to 3 levels."""

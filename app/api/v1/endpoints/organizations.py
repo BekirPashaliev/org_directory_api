@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import SessionDep
 from app.schemas.organization import OrganizationOut, OrganizationOutWithDistance
+from app.services.activities import activity_exists
+from app.services.buildings import building_exists
 from app.services.organizations import (
     get_organization,
     list_organizations_by_activity,
@@ -23,6 +25,8 @@ async def organizations_by_building(building_id: int, session: SessionDep) -> li
     """List organizations in a specific building."""
 
     orgs = await list_organizations_by_building(session, building_id=building_id)
+    if not orgs and not await building_exists(session, building_id=building_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Building not found")
     return [OrganizationOut.model_validate(o) for o in orgs]
 
 
@@ -35,6 +39,8 @@ async def organizations_by_activity(
     """List organizations for a given activity."""
 
     orgs = await list_organizations_by_activity(session, activity_id=activity_id, include_descendants=include_descendants)
+    if not orgs and not await activity_exists(session, activity_id=activity_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
     return [OrganizationOut.model_validate(o) for o in orgs]
 
 
@@ -64,6 +70,20 @@ async def organizations_geo(
     limit: int = Query(default=200, ge=1, le=500),
 ) -> list[OrganizationOutWithDistance]:
     """Search organizations in a given radius or bounding box around the point."""
+
+    # Conditional required params (tests expect 422 instead of 500)
+    if mode == "radius":
+        if lat is None or lon is None or radius_m is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="lat, lon and radius_m are required for mode=radius",
+            )
+    elif mode == "bbox":
+        if min_lat is None or max_lat is None or min_lon is None or max_lon is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="min_lat, max_lat, min_lon and max_lon are required for mode=bbox",
+            )
 
     try:
         rows = await list_organizations_by_geo(

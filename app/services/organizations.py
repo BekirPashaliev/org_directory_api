@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.sql import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -55,11 +57,23 @@ async def search_organizations_by_name(session: AsyncSession, *, q: str, limit: 
     q_stripped = q.strip()
     if not q_stripped:
         return []
-    q_like = f"%{q_stripped}%"
-    stmt = _org_base_query().where(Organization.name.ilike(q_like)).order_by(Organization.name).limit(limit)
+    escaped = _escape_like(q_stripped)
+    q_like = f"%{escaped}%"
+    stmt = (
+        _org_base_query()
+        .where(Organization.name.ilike(q_like, escape="\\"))
+        .order_by(Organization.name)
+        .limit(limit)
+    )
     res = await session.execute(stmt)
     return list(res.scalars().all())
 
+def _escape_like(value: str, *, escape: str = "\\") -> str:
+    return (
+        value.replace(escape, escape + escape)
+        .replace("%", escape + "%")
+        .replace("_", escape + "_")
+    )
 
 async def list_buildings(session: AsyncSession) -> list[Building]:
     stmt = select(Building).order_by(Building.id)
@@ -67,7 +81,13 @@ async def list_buildings(session: AsyncSession) -> list[Building]:
     return list(res.scalars().all())
 
 
-def _haversine_distance_m(*, lat_deg: float, lon_deg: float, building_lat_col, building_lon_col):
+def _haversine_distance_m(
+    *,
+    lat_deg: float,
+    lon_deg: float,
+    building_lat_col: ColumnElement[float],
+    building_lon_col: ColumnElement[float],
+) -> ColumnElement[float]:
 
     """Returns SQL expression for great-circle distance in meters."""
 
@@ -107,6 +127,9 @@ async def list_organizations_by_geo(
         if radius_m is None or radius_m <= 0:
             raise ValueError("radius_m must be provided and > 0 for mode=radius")
 
+        _validate_lat_lon(lat=lat, lon=lon)
+        min_lat, max_lat, min_lon, max_lon = _bbox_around(lat=lat, lon=lon, radius_m=radius_m)
+
         distance = _haversine_distance_m(
             lat_deg=lat,
             lon_deg=lon,
@@ -116,6 +139,8 @@ async def list_organizations_by_geo(
 
         stmt = (
             base.add_columns(distance.label("distance_m"))
+            .where(Building.latitude.between(min_lat, max_lat))
+            .where(Building.longitude.between(min_lon, max_lon))
             .where(distance <= radius_m)
             .order_by(distance)
             .limit(limit)
@@ -124,6 +149,14 @@ async def list_organizations_by_geo(
         return [(org, float(dist)) for org, dist in res.all()]
 
     if mode == "bbox":
+        if min_lat > max_lat:
+            raise ValueError("min_lat must be <= max_lat")
+        if min_lon > max_lon:
+            raise ValueError("min_lon must be <= max_lon")
+
+        _validate_lat_lon(lat=min_lat, lon=min_lon)
+        _validate_lat_lon(lat=max_lat, lon=max_lon)
+
         # Bounding box filter
         if None in (min_lat, max_lat, min_lon, max_lon):
             raise ValueError("min_lat, max_lat, min_lon, max_lon must be provided for mode=bbox")
@@ -138,3 +171,27 @@ async def list_organizations_by_geo(
         return [(org, None) for org in res.scalars().all()]
 
     raise ValueError("Unknown mode")
+
+
+def _validate_lat_lon(*, lat: float | None, lon: float | None) -> None:
+    if lat is None or lon is None:
+        raise ValueError("lat/lon must be provided")
+    if not (-90.0 <= lat <= 90.0):
+        raise ValueError("lat must be between -90 and 90")
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError("lon must be between -180 and 180")
+
+
+def _bbox_around(*, lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
+    deg_per_meter_lat = 1.0 / 111_320.0
+    lat_delta = radius_m * deg_per_meter_lat
+    lat_rad = math.radians(lat)
+    cos_lat = max(0.01, abs(math.cos(lat_rad)))
+    deg_per_meter_lon = 1.0 / (111_320.0 * cos_lat)
+    lon_delta = radius_m * deg_per_meter_lon
+    return (
+        max(-90.0, lat - lat_delta),
+        min(90.0, lat + lat_delta),
+        max(-180.0, lon - lon_delta),
+        min(180.0, lon + lon_delta),
+    )

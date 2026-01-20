@@ -4,7 +4,7 @@ from fastapi import APIRouter
 
 from app.api.deps import SessionDep
 from app.schemas.building import BuildingOut
-from app.services.organizations import list_buildings
+from app.services.buildings import list_buildings
 
 
 router = APIRouter(prefix="/buildings")
